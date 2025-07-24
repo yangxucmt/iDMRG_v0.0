@@ -1,4 +1,4 @@
-This is the iDMRG code I used in my work . I basically build everything from scratch to suit my specific needs. The code borrowed significant insights and practices from ITensors and TenPy.
+This is the iDMRG code I used in my work. I basically build everything from scratch to suit my specific needs. The code borrowed significant insights and practices from ITensors and TenPy.
 
 There are still many features I want to add to my iDMRG code:
 1. Implement the quantum number conservation
@@ -8,11 +8,9 @@ There are still many features I want to add to my iDMRG code:
 
 
 
-Implementing the quantum number conservation still involves many testing:
-1. Modify the iDMRG sweep code without noise (-Apr 21)
-2. Modify the iDMRG sweep code with noise  (-Apr 24)
-3. Test my MPO generation (-Apr 26)
-4. Test iDMRG initial state (all the "dag()" places)
+Next step
+1. Add QN-conservation
+2. Support fermion.
 
 
 Comments and feedbacks are welcomed. And if you want to use the code in your own work, please contact me.
@@ -29,8 +27,6 @@ Comments and feedbacks are welcomed. And if you want to use the code in your own
 
 - ✅ Two-site iDMRG algorithm
 - ✅ iMPO generator for standard lattice models (e.g., XXZ, Hubbard)
-- ✅ U(1) symmetry support (block-sparse tensors)
-- ✅ Basic parallelization for observables and MPO building
 - ✅ Minimal, hackable design for prototyping and teaching
 
 ## Installation
