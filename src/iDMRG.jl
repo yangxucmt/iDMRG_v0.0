@@ -56,6 +56,7 @@ function update_iLPs!(iH::MPO, psi::ITensor, LPs::MPO, siteind)
     LPs[newsiteind] *= prime(dag(psi))
 end
 
+
 function update_iRPs!(iH::MPO, psi::ITensor, RPs::MPO, siteind)
     uclength = length(iH)
     newsiteind = mod1(siteind - 1, uclength)
@@ -63,6 +64,34 @@ function update_iRPs!(iH::MPO, psi::ITensor, RPs::MPO, siteind)
     RPs[newsiteind] *= psi
     RPs[newsiteind] *= iH[siteind]
     RPs[newsiteind] *= prime(dag(psi))
+end
+
+function update_iLP_disk!(iH::MPO, psi::ITensor, siteind)
+    uclength = length(iH)
+    newsiteind = mod1(siteind + 1, uclength)
+    LP_temp = jldopen("LP_$siteind.jld2", "r") do file
+        copy(file["LP_$siteind"])
+    end
+    LP_temp *= psi
+    LP_temp *= iH[siteind]
+    LP_temp *= prime(dag(psi))
+    jldopen("LP_$newsiteind.jld2", "w") do file  # "r+" = read+write, don't destroy existing data
+        file["LP_$newsiteind"] = LP_temp       # this will add or overwrite "LP_1", "LP_2", etc.
+    end
+end
+
+function update_iRP_disk!(iH::MPO, psi::ITensor, siteind)
+    uclength = length(iH)
+    newsiteind = mod1(siteind - 1, uclength)
+    RP_temp = jldopen("RP_$siteind.jld2", "r") do file
+        copy(file["RP_$siteind"])
+    end
+    RP_temp *= psi
+    RP_temp *= iH[siteind]
+    RP_temp *= prime(dag(psi))
+    jldopen("RP_$newsiteind.jld2", "w") do file  # "r+" = read+write, don't destroy existing data
+        file["RP_$newsiteind"] = RP_temp       # this will add or overwrite "RP_1", "RP_2", etc.
+    end
 end
 
 function noise_expand_left(u, s, v, lrp, mpo, noise; maxdim)
@@ -93,7 +122,7 @@ function noise_expand_left(u, s, v, lrp, mpo, noise; maxdim)
     returnedM = newB
     returnedM *= venlarged
     returnedM *= senlarged
-    return [uenlarged, venlarged*senlarged, newB]
+    return [uenlarged, venlarged * senlarged, newB]
 end
 
 function noise_expand_right(u, s, v, lrp, mpo, noise; maxdim)
@@ -125,7 +154,7 @@ function noise_expand_right(u, s, v, lrp, mpo, noise; maxdim)
     returnedM = newA
     returnedM *= uenlarged
     returnedM *= senlarged
-    return [newA, uenlarged*senlarged, venlarged]
+    return [newA, uenlarged * senlarged, venlarged]
 end
 
 
@@ -160,6 +189,54 @@ function update_bond!(iham, psi, LRP, sites; sweep, update_lrp, kryloverr, krylo
 
     if update_lrp[2] == true
         update_iRPs!(iham, v, RPs::MPO, sitei2)
+    end
+    psi[sitei1] = u
+    psi[sitei2] = v
+    if verbose == 0
+        return s #Let's return lambda here.
+    elseif verbose == 1
+        return [s, valslist[1]]
+    end
+end
+
+function update_bond_disk(iham, psi, LRP, sites; sweep, update_lrp, kryloverr, krylovdimmax, niter, maxdim, cutoff, verbose=0, noise="off", noisedir="L") #Let's not change the value during the process
+    # Here, LPs, RPs, sitei, and MPOs, should be stored in the same record
+    # We always update the wave-function in place, because this updates the Gamma in Vidal notation. We can return the new bond lambda value.
+    LPs, RPs = LRP
+    #Here LPs, RPs are just one single MPO
+    sitei1, sitei2 = sites
+    LPs = jldopen("LP_$sitei1.jld2", "r") do file
+        file["LP_$sitei1"]
+    end
+    RPs = jldopen("RP_$sitei2.jld2", "r") do file
+        file["RP_$sitei2"]
+    end
+    initialguess0 = psi[sitei1] * psi[sitei2]
+    ph = Heff(LPs, RPs, iham[sitei1], iham[sitei2])
+    if sweep == true #Only when sweep==true, consider add noise
+        if noise == "off"
+            valslist, vecslist = eigsolve(ph, initialguess0, 1, :SR, krylovdim=krylovdimmax, tol=kryloverr, maxiter=niter, verbosity=0, ishermitian=true)
+            u, s, v = svd(vecslist[1], uniqueinds(psi[sitei1], psi[sitei2]); maxdim, cutoff)
+        elseif noise isa Number
+            valslist, vecslist = eigsolve(ph, initialguess0, 1, :SR, krylovdim=krylovdimmax, tol=kryloverr, maxiter=niter, verbosity=0, ishermitian=true)
+            u, s, v = svd(vecslist[1], uniqueinds(psi[sitei1], psi[sitei2]); maxdim, cutoff)
+            if noisedir == "L"
+                u, s, v = noise_expand_left(u, s, v, LPs, iham[sitei1], noise; maxdim)
+            elseif noisedir == "R"
+                u, s, v = noise_expand_right(u, s, v, RPs, iham[sitei2], noise; maxdim)
+            end
+        end
+    else
+        u, s, v = svd(initialguess0, uniqueinds(psi[sitei1], psi[sitei2]); maxdim, cutoff)
+    end
+
+    # Also modify the wave-function, always do it.
+    if update_lrp[1] == true
+        update_iLP_disk!(iham, u, sitei1)
+    end
+
+    if update_lrp[2] == true
+        update_iRP_disk!(iham, v, sitei2)
     end
     psi[sitei1] = u
     psi[sitei2] = v
@@ -212,87 +289,194 @@ function iDMRG_init(isites, impolinks)
 end
 
 function idmrg_general(iH::MPO, psi0::MPS, LPinput, RPinput, L_n2, L_np4; nsweeps, maxdim=400, cutoff=1e-8, krylovdimmax=3, niter=2, verbosity=1, kryloverr=1e-14, noise="off")
+    #We define two temporary variables LP_temp, RP_temp to store the temps used in calculation
     L = size(iH)[1]
     gsenergy_ini = 0
     gsenergy_fin = 0
-
-    LPs = MPO(L)
-    RPs = MPO(L)
-    LPs[1] = copy(LPinput)
-    RPs[L] = copy(RPinput)
-    lambda_2 = copy(L_n2)
-    lambda_L = copy(L_np4)
-    psis = copy(psi0)
-    psis[2] *= lambda_2
-    #psis, lambda_L=idmrg_gauge(psi0)
-
-    #After gauging, we have A1, (Lambda B2), B3, B4, ..., BL
-    maxbonddim = 0
-
-    #Prepare right environment
-    for i = L:-1:3
-        update_iRPs!(iH, psis[i], RPs, i)
+    save_to_disk = false
+    if maxdim * maxdim * dim(commonind(iH[1], iH[2])) * L * 16 * 2 > 5e9
+        save_to_disk = true
     end
 
-    #The first part: sweep from left to right
-    for i = 1:L-2
-        if i != 1
-            lambdai = update_bond!(iH, psis, [LPs, RPs], [i, i + 1]; sweep=true, update_lrp=[true, false], cutoff, maxdim, krylovdimmax, niter, kryloverr, noise,noisedir="L") #This is updating the wave-function and the environment
-        else
-            lambdai, gsenergy_ini = update_bond!(iH, psis, [LPs, RPs], [i, i + 1]; sweep=true, update_lrp=[true, false], cutoff, maxdim, krylovdimmax, niter, kryloverr, verbose=1, noise,noisedir="L")
+    if save_to_disk
+        LP_temp = LPinput
+        RP_temp = RPinput
+
+        filename = "LP_1.jld2"
+        jldopen(filename, "w") do file
+            file["LP_1"] = LP_temp
         end
-        #Get the lambda_(L-1) from the last step
-        psis[i+1] *= lambdai
+
+        filename = "RP_$L.jld2"
+        jldopen(filename, "w") do file
+            file["RP_$L"] = RP_temp
+        end
+
+        lambda_2 = copy(L_n2)
+        lambda_L = copy(L_np4)
+        psis = copy(psi0)
+        psis[2] *= lambda_2
+
+        maxbonddim = 0
+
+        # Delete the file
+
+        for i = L:-1:3
+            update_iRP_disk!(iH, psis[i], i)
+        end
+
+        #The first part: sweep from left to right
+        for i = 1:L-2
+            if i != 1
+                lambdai = update_bond_disk(iH, psis, [LP_temp, RP_temp], [i, i + 1]; sweep=true, update_lrp=[true, false], cutoff, maxdim, krylovdimmax, niter, kryloverr, noise, noisedir="L") #This is updating the wave-function and the environment
+            else
+                lambdai, gsenergy_ini = update_bond_disk(iH, psis, [LP_temp, RP_temp], [i, i + 1]; sweep=true, update_lrp=[true, false], cutoff, maxdim, krylovdimmax, niter, kryloverr, verbose=1, noise, noisedir="L")
+            end
+            #Get the lambda_(L-1) from the last step
+            psis[i+1] *= lambdai
+        end
+
+        lambda_lm1 = update_bond_disk(iH, psis, [LP_temp, RP_temp], [L - 1, L]; sweep=true, update_lrp=[true, true], cutoff, maxdim, krylovdimmax, niter, kryloverr) #This is updating the wave-function and the environment
+        psis[L-1] *= lambda_lm1
+
+        for i = L-2:-1:1
+            lambdai = update_bond_disk(iH, psis, [LP_temp, RP_temp], [i, i + 1]; sweep=false, update_lrp=[false, true], cutoff, maxdim, krylovdimmax, niter, kryloverr)
+            psis[i] *= lambdai
+        end
+
+        #At this point, the environment RP[1] is ready.
+        #Insert one unit-cell
+        psis[L] *= lambda_lm1 #This is for dmrg
+        psis[L] *= ITensor(pinv(array(lambda_L), 1e-8), inds(lambda_L))
+
+        lambda_temp = update_bond_disk(iH, psis, [LP_temp, RP_temp], [L, 1]; sweep=true, update_lrp=[true, false], cutoff, maxdim, krylovdimmax, niter, kryloverr, noise, noisedir="L")
+        psis[1] *= lambda_temp
+        lambda_temp, gsenergy_fin = update_bond_disk(iH, psis, [LP_temp, RP_temp], [1, 2]; sweep=true, update_lrp=[false, true], cutoff, maxdim, krylovdimmax, niter, kryloverr, verbose=1, noise, noisedir="R")
+        psis[1] *= lambda_temp
+        new_lambda_L = update_bond_disk(iH, psis, [LP_temp, RP_temp], [L, 1]; sweep=true, update_lrp=[true, true], cutoff, maxdim, krylovdimmax, niter, kryloverr)
+
+        psis[L] *= new_lambda_L #This will be used as the right tensor in line 221, i.e., i=L-1:-1:2 first step
+        psis[1] *= new_lambda_L
+
+        #At this point, we have AL, lambda_L*B1, B2,..., BL-1
+        #Now add one more unit-cell.
+
+        for i = 1:L-2
+            #We will use lambda_L later, probably don't need other stuff
+            lambdai = update_bond_disk(iH, psis, [LP_temp, RP_temp], [i, i + 1]; sweep=false, update_lrp=[true, false], cutoff, maxdim, krylovdimmax, niter, kryloverr)
+            psis[i+1] *= lambdai
+        end
+
+        psis[L-1] *= ITensor(pinv(array(lambda_lm1), 1e-8), inds(lambda_lm1)) #Use the lm1 obtained before
+
+        for i = L-1:-1:2
+            lambdai = update_bond_disk(iH, psis, [LP_temp, RP_temp], [i, i + 1]; sweep=true, update_lrp=[false, true], cutoff, maxdim, krylovdimmax, niter, kryloverr, noise, noisedir="R")
+            psis[i] *= lambdai
+        end
+
+        new_lambda_1 = update_bond_disk(iH, psis, [LP_temp, RP_temp], [1, 2]; sweep=false, update_lrp=[false, false], cutoff, maxdim, krylovdimmax, niter, kryloverr)
+        maxbonddim = size(new_lambda_1)[1]
+
+        if verbosity == 1
+            println("Maximum bond dimension is: ", maxbonddim)
+            println("Energy is: ", (gsenergy_fin - gsenergy_ini) / (L))
+            println("Lambda overlap is: ", lambdamodule(new_lambda_1, L_n2))
+        end
+
+        LP_temp = jldopen("LP_1.jld2", "r") do file
+            file["LP_1"]
+        end
+        RP_temp = jldopen("RP_$L.jld2", "r") do file
+            file["RP_$L"]
+        end
+
+        for i = 1:L
+            rm("LP_$i.jld2")
+            rm("RP_$i.jld2")
+        end
+
+        return [psis, LP_temp, RP_temp, new_lambda_1, new_lambda_L]
+
+    else
+        LPs = MPO(L)
+        RPs = MPO(L)
+        LPs[1] = copy(LPinput)
+        RPs[L] = copy(RPinput)
+        lambda_2 = copy(L_n2)
+        lambda_L = copy(L_np4)
+        psis = copy(psi0)
+        psis[2] *= lambda_2
+        #psis, lambda_L=idmrg_gauge(psi0)
+
+        #After gauging, we have A1, (Lambda B2), B3, B4, ..., BL
+        maxbonddim = 0
+
+        #Prepare right environment
+        for i = L:-1:3
+            update_iRPs!(iH, psis[i], RPs, i)
+        end
+
+        #The first part: sweep from left to right
+        for i = 1:L-2
+            if i != 1
+                lambdai = update_bond!(iH, psis, [LPs, RPs], [i, i + 1]; sweep=true, update_lrp=[true, false], cutoff, maxdim, krylovdimmax, niter, kryloverr, noise, noisedir="L") #This is updating the wave-function and the environment
+            else
+                lambdai, gsenergy_ini = update_bond!(iH, psis, [LPs, RPs], [i, i + 1]; sweep=true, update_lrp=[true, false], cutoff, maxdim, krylovdimmax, niter, kryloverr, verbose=1, noise, noisedir="L")
+            end
+            #Get the lambda_(L-1) from the last step
+            psis[i+1] *= lambdai
+        end
+
+        lambda_lm1 = update_bond!(iH, psis, [LPs, RPs], [L - 1, L]; sweep=true, update_lrp=[true, true], cutoff, maxdim, krylovdimmax, niter, kryloverr) #This is updating the wave-function and the environment
+        psis[L-1] *= lambda_lm1
+
+        for i = L-2:-1:1
+            lambdai = update_bond!(iH, psis, [LPs, RPs], [i, i + 1]; sweep=false, update_lrp=[false, true], cutoff, maxdim, krylovdimmax, niter, kryloverr)
+            psis[i] *= lambdai
+        end
+
+        #At this point, the environment RP[1] is ready.
+        #Insert one unit-cell
+        psis[L] *= lambda_lm1 #This is for dmrg
+        psis[L] *= ITensor(pinv(array(lambda_L), 1e-8), inds(lambda_L))
+
+        lambda_temp = update_bond!(iH, psis, [LPs, RPs], [L, 1]; sweep=true, update_lrp=[true, false], cutoff, maxdim, krylovdimmax, niter, kryloverr, noise, noisedir="L")
+        psis[1] *= lambda_temp
+        lambda_temp, gsenergy_fin = update_bond!(iH, psis, [LPs, RPs], [1, 2]; sweep=true, update_lrp=[false, true], cutoff, maxdim, krylovdimmax, niter, kryloverr, verbose=1, noise, noisedir="R")
+        psis[1] *= lambda_temp
+        new_lambda_L = update_bond!(iH, psis, [LPs, RPs], [L, 1]; sweep=true, update_lrp=[true, true], cutoff, maxdim, krylovdimmax, niter, kryloverr)
+
+        psis[L] *= new_lambda_L #This will be used as the right tensor in line 221, i.e., i=L-1:-1:2 first step
+        psis[1] *= new_lambda_L
+
+        #At this point, we have AL, lambda_L*B1, B2,..., BL-1
+        #Now add one more unit-cell.
+
+        for i = 1:L-2
+            #We will use lambda_L later, probably don't need other stuff
+            lambdai = update_bond!(iH, psis, [LPs, RPs], [i, i + 1]; sweep=false, update_lrp=[true, false], cutoff, maxdim, krylovdimmax, niter, kryloverr)
+            psis[i+1] *= lambdai
+        end
+
+        psis[L-1] *= ITensor(pinv(array(lambda_lm1), 1e-8), inds(lambda_lm1)) #Use the lm1 obtained before
+
+        for i = L-1:-1:2
+            lambdai = update_bond!(iH, psis, [LPs, RPs], [i, i + 1]; sweep=true, update_lrp=[false, true], cutoff, maxdim, krylovdimmax, niter, kryloverr, noise, noisedir="R")
+            psis[i] *= lambdai
+        end
+
+        new_lambda_1 = update_bond!(iH, psis, [LPs, RPs], [1, 2]; sweep=false, update_lrp=[false, false], cutoff, maxdim, krylovdimmax, niter, kryloverr)
+        maxbonddim = size(new_lambda_1)[1]
+
+        if verbosity == 1
+            println("Maximum bond dimension is: ", maxbonddim)
+            println("Energy is: ", (gsenergy_fin - gsenergy_ini) / (L))
+            println("Lambda overlap is: ", lambdamodule(new_lambda_1, L_n2))
+        end
+
+        return [psis, LPs[1], RPs[L], new_lambda_1, new_lambda_L]
     end
 
-    lambda_lm1 = update_bond!(iH, psis, [LPs, RPs], [L - 1, L]; sweep=true, update_lrp=[true, true], cutoff, maxdim, krylovdimmax, niter, kryloverr) #This is updating the wave-function and the environment
-    psis[L-1] *= lambda_lm1
-
-    for i = L-2:-1:1
-        lambdai = update_bond!(iH, psis, [LPs, RPs], [i, i + 1]; sweep=false, update_lrp=[false, true], cutoff, maxdim, krylovdimmax, niter, kryloverr)
-        psis[i] *= lambdai
-    end
-
-    #At this point, the environment RP[1] is ready.
-    #Insert one unit-cell
-    psis[L] *= lambda_lm1 #This is for dmrg
-    psis[L] *= ITensor(pinv(array(lambda_L), 1e-8), inds(lambda_L))
-
-    lambda_temp = update_bond!(iH, psis, [LPs, RPs], [L, 1]; sweep=true, update_lrp=[true, false], cutoff, maxdim, krylovdimmax, niter, kryloverr,noise,noisedir="L")
-    psis[1] *= lambda_temp
-    lambda_temp, gsenergy_fin = update_bond!(iH, psis, [LPs, RPs], [1, 2]; sweep=true, update_lrp=[false, true], cutoff, maxdim, krylovdimmax, niter, kryloverr, verbose=1,noise,noisedir="R")
-    psis[1] *= lambda_temp
-    new_lambda_L = update_bond!(iH, psis, [LPs, RPs], [L, 1]; sweep=true, update_lrp=[true, true], cutoff, maxdim, krylovdimmax, niter, kryloverr)
-
-    psis[L] *= new_lambda_L #This will be used as the right tensor in line 221, i.e., i=L-1:-1:2 first step
-    psis[1] *= new_lambda_L
-
-    #At this point, we have AL, lambda_L*B1, B2,..., BL-1
-    #Now add one more unit-cell.
-
-    for i = 1:L-2
-        #We will use lambda_L later, probably don't need other stuff
-        lambdai = update_bond!(iH, psis, [LPs, RPs], [i, i + 1]; sweep=false, update_lrp=[true, false], cutoff, maxdim, krylovdimmax, niter, kryloverr)
-        psis[i+1] *= lambdai
-    end
-
-    psis[L-1] *= ITensor(pinv(array(lambda_lm1), 1e-8), inds(lambda_lm1)) #Use the lm1 obtained before
-
-    for i = L-1:-1:2
-        lambdai = update_bond!(iH, psis, [LPs, RPs], [i, i + 1]; sweep=true, update_lrp=[false, true], cutoff, maxdim, krylovdimmax, niter, kryloverr,noise,noisedir="R")
-        psis[i] *= lambdai
-    end
-
-    new_lambda_1 = update_bond!(iH, psis, [LPs, RPs], [1, 2]; sweep=false, update_lrp=[false, false], cutoff, maxdim, krylovdimmax, niter, kryloverr)
-    maxbonddim = size(new_lambda_1)[1]
-
-    if verbosity == 1
-        println("Maximum bond dimension is: ", maxbonddim)
-        println("Energy is: ", (gsenergy_fin - gsenergy_ini) / (L))
-        println("Lambda overlap is: ", lambdamodule(new_lambda_1, L_n2))
-    end
-
-    return [psis, LPs[1], RPs[L], new_lambda_1, new_lambda_L]
 end
 
 end
