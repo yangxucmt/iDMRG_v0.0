@@ -1,16 +1,16 @@
-This is the iDMRG code I used in my work. I basically build everything from scratch to suit my specific needs. The code borrowed significant insights and practices from ITensors and TenPy.
+This repository contains a lightly cleaned-up implementation of the iDMRG (infinite DMRG) routines used in [arXiv:2503.22792]. It was written from scratch to meet the specific requirements of that project, while adopting many ideas and best practices from the ITensor and TenPy ecosystems. Any remaining mistakes are mine.
+
 
 Features:
 1. Gauge a periodic MPS.
 2. Compute correlation functions
 3. Draw figures for Kitaev model
-4. Compute 1d TFIM and compare with energies
+4. Overlap of two iMPS's.
 
-Next steps
+Future plans of expanding the codebase:
 1. Add QN-conservation
 2. Support fermion.
 3. Add single-site iDMRG.
-
 
 
 Comments and feedbacks are welcomed. And if you want to use the code in your own work, please contact me.
