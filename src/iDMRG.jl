@@ -21,11 +21,14 @@ struct MPSdata
 end
 
 function idmrg_run(iH, sites;
-                   maxdimlist = [50, 100, 250],
-                   sweeplist  = [2, 2, 3],
-                   init_cutoff = 1e-2,
-                   cutoff      = 1e-10,
-                   verbose     = true)
+    maxdimlist=[50, 100, 150],
+    sweeplist=[2, 2, 3],
+    noise=1e-2, # This is the noise
+    cutoff=1e-10,
+    krylovdimmax=3, # Default value
+    niter=1,
+    noiseonoff=false,  # Default turn off noise
+    verbose=true)
 
     # Build leftinds
     leftinds = [commonind(iH[mod1(i - 1, length(iH))], iH[i]) for i in 1:length(iH)]
@@ -33,24 +36,23 @@ function idmrg_run(iH, sites;
     # Initialize and warm-up
     state = iDMRG_init(sites, leftinds)
     verbose && println("finish initialization")
-    state = idmrg_general(iH, state; maxdim=maxdimlist[1], cutoff=init_cutoff, nsweeps=1,verbose)
+    state = idmrg_general(iH, state; maxdim=maxdimlist[1], cutoff, nsweeps=1, verbose)
 
     # Helper: single sweep call
     sweep!(state, l; kwargs...) = idmrg_general(iH, state; kwargs...)
 
     # Outer loop
-    for l in eachindex(maxdimlist)
-        noise = l <= 3 ? 1e-2 : 0.0
-        kry   = l <= 3 ? 3    : 2
+    for l in eachindex(maxdimlist) # For the noise step, just use some 
         verbose && println("== Global sweep $l ==")
-
-        state = sweep!(state, l; nsweeps=1, krylovdimmax=kry, niter=1,
-                       maxdim=maxdimlist[l], cutoff=cutoff, noise=noise,verbose)
+        if noiseonoff # If noise==true, do a noise sweep
+            state = sweep!(state, l; nsweeps=1, krylovdimmax, niter,
+                maxdim=maxdimlist[l], cutoff=cutoff, noise=noise, verbose)
+        end
 
         for i in 1:sweeplist[l]
             verbose && println("  Sweep $i")
-            state = sweep!(state, l; nsweeps=1, krylovdimmax=2, niter=1,
-                           maxdim=maxdimlist[l], cutoff=cutoff, noise=noise,verbose)
+            state = sweep!(state, l; nsweeps=1, krylovdimmax, niter,
+                maxdim=maxdimlist[l], cutoff=cutoff, noise="off", verbose)
         end
     end
 
@@ -336,11 +338,11 @@ end
 
 function idmrg_general(iH::MPO, mps::MPSdata; nsweeps, maxdim=400, cutoff=1e-8, krylovdimmax=3, niter=2, verbose=true, kryloverr=1e-14, noise="off")
     #We define two temporary variables LP_temp, RP_temp to store the temps used in calculation
-    psi0=mps.ψ
-    LPinput=mps.LP
-    RPinput=mps.RP
-    L_n2=mps.lambda_1
-    L_np4=mps.lambda_end
+    psi0 = mps.ψ
+    LPinput = mps.LP
+    RPinput = mps.RP
+    L_n2 = mps.lambda_1
+    L_np4 = mps.lambda_end
     L = size(iH)[1]
     gsenergy_ini = 0
     gsenergy_fin = 0
