@@ -60,7 +60,6 @@ function expand_opstring(opstring)
     return expanded, first_site
 end
 
-
 function op_to_hm_inf(oplist::MPOsum, sites)
     N = length(sites)
     uc = only(size(sites))

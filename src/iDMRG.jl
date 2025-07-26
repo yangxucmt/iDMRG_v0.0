@@ -7,9 +7,55 @@ using KrylovKit
 using Base.Threads
 using Dates
 using JLD2
+using LaTeXStrings
 
-export idmrg_general, iDMRG_init, lambdamodule
+export idmrg_general, iDMRG_init, lambdamodule, idmrg_run, MPSdata, left_canonical_form, right_canonical_form
 
+
+struct MPSdata
+    ψ::MPS
+    LP::ITensor
+    RP::ITensor
+    lambda_1::ITensor
+    lambda_end::ITensor
+end
+
+function idmrg_run(iH, sites;
+                   maxdimlist = [50, 100, 250],
+                   sweeplist  = [2, 2, 3],
+                   init_cutoff = 1e-2,
+                   cutoff      = 1e-10,
+                   verbose     = true)
+
+    # Build leftinds
+    leftinds = [commonind(iH[mod1(i - 1, length(iH))], iH[i]) for i in 1:length(iH)]
+
+    # Initialize and warm-up
+    state = iDMRG_init(sites, leftinds)
+    verbose && println("finish initialization")
+    state = idmrg_general(iH, state; maxdim=maxdimlist[1], cutoff=init_cutoff, nsweeps=1,verbose)
+
+    # Helper: single sweep call
+    sweep!(state, l; kwargs...) = idmrg_general(iH, state; kwargs...)
+
+    # Outer loop
+    for l in eachindex(maxdimlist)
+        noise = l <= 3 ? 1e-2 : 0.0
+        kry   = l <= 3 ? 3    : 2
+        verbose && println("== Global sweep $l ==")
+
+        state = sweep!(state, l; nsweeps=1, krylovdimmax=kry, niter=1,
+                       maxdim=maxdimlist[l], cutoff=cutoff, noise=noise,verbose)
+
+        for i in 1:sweeplist[l]
+            verbose && println("  Sweep $i")
+            state = sweep!(state, l; nsweeps=1, krylovdimmax=2, niter=1,
+                           maxdim=maxdimlist[l], cutoff=cutoff, noise=noise,verbose)
+        end
+    end
+
+    return state
+end
 
 function lambdamodule(l1, l2)
     mat1 = array(l1)
@@ -285,11 +331,16 @@ function iDMRG_init(isites, impolinks)
     initialmat = zeros(ComplexF64, dim(impolinks[1]), 1, 1)#Make sure this is correct
     initialmat[1, :, :] = Matrix{Float64}(I, 1, 1)
     RPuc = ITensor(initialmat, impolinks[1], prime(llinks[uc+2]), llinks[uc+2])
-    return [psis0, LP10, RPuc, L_2, L_4]
+    return MPSdata(psis0, LP10, RPuc, L_2, L_4)
 end
 
-function idmrg_general(iH::MPO, psi0::MPS, LPinput, RPinput, L_n2, L_np4; nsweeps, maxdim=400, cutoff=1e-8, krylovdimmax=3, niter=2, verbosity=1, kryloverr=1e-14, noise="off")
+function idmrg_general(iH::MPO, mps::MPSdata; nsweeps, maxdim=400, cutoff=1e-8, krylovdimmax=3, niter=2, verbose=true, kryloverr=1e-14, noise="off")
     #We define two temporary variables LP_temp, RP_temp to store the temps used in calculation
+    psi0=mps.ψ
+    LPinput=mps.LP
+    RPinput=mps.RP
+    L_n2=mps.lambda_1
+    L_np4=mps.lambda_end
     L = size(iH)[1]
     gsenergy_ini = 0
     gsenergy_fin = 0
@@ -377,10 +428,10 @@ function idmrg_general(iH::MPO, psi0::MPS, LPinput, RPinput, L_n2, L_np4; nsweep
         new_lambda_1 = update_bond_disk(iH, psis, [LP_temp, RP_temp], [1, 2]; sweep=false, update_lrp=[false, false], cutoff, maxdim, krylovdimmax, niter, kryloverr)
         maxbonddim = size(new_lambda_1)[1]
 
-        if verbosity == 1
+        if verbose
             println("Maximum bond dimension is: ", maxbonddim)
             println("Energy is: ", (gsenergy_fin - gsenergy_ini) / (L))
-            println("Lambda overlap is: ", lambdamodule(new_lambda_1, L_n2))
+            println("<Λ(n)|Λ(n+1)> overlap is: ", lambdamodule(new_lambda_1, L_n2))
         end
 
         LP_temp = jldopen("LP_1.jld2", "r") do file
@@ -395,8 +446,7 @@ function idmrg_general(iH::MPO, psi0::MPS, LPinput, RPinput, L_n2, L_np4; nsweep
             rm("RP_$i.jld2")
         end
 
-        return [psis, LP_temp, RP_temp, new_lambda_1, new_lambda_L]
-
+        return MPSdata(psis, LP_temp, RP_temp, new_lambda_1, new_lambda_L)
     else
         LPs = MPO(L)
         RPs = MPO(L)
@@ -468,14 +518,115 @@ function idmrg_general(iH::MPO, psi0::MPS, LPinput, RPinput, L_n2, L_np4; nsweep
         new_lambda_1 = update_bond!(iH, psis, [LPs, RPs], [1, 2]; sweep=false, update_lrp=[false, false], cutoff, maxdim, krylovdimmax, niter, kryloverr)
         maxbonddim = size(new_lambda_1)[1]
 
-        if verbosity == 1
+        if verbose
             println("Maximum bond dimension is: ", maxbonddim)
             println("Energy is: ", (gsenergy_fin - gsenergy_ini) / (L))
-            println("Lambda overlap is: ", lambdamodule(new_lambda_1, L_n2))
+            println("<Λ(n)|Λ(n+1)> overlap is: ", lambdamodule(new_lambda_1, L_n2))
         end
 
-        return [psis, LPs[1], RPs[L], new_lambda_1, new_lambda_L]
+        return MPSdata(psis, LPs[1], RPs[L], new_lambda_1, new_lambda_L)
     end
+
+end
+
+function left_canonical_form(state::MPSdata, isites; pseudoinv=1e-8, tol=1e-8, maxsweeps=20)
+    #Initialization
+    psi = copy(state.ψ)
+    l2tensor = copy(state.lambda_1)
+    l4tensor = copy(state.lambda_end)
+    psi[1] = psi[1] * l2tensor
+    linv = ITensor(pinv(array(l4tensor), pseudoinv), commonind(psi[1], l4tensor), commonind(psi[end], l4tensor))  #Here we used the Penrose pseudo-inverse.
+    psi[end] = psi[end] * linv
+
+    uc = length(psi)
+    Mleftind = commonind(psi[uc], psi[1])
+    newMleftind = Index(dim(Mleftind))
+    L_ini = dense(delta(Mleftind, newMleftind)) / sqrt(dim(Mleftind))
+    newpsi = copy(psi)
+    newbond = newMleftind
+    realtol = 1
+    Liter = L_ini
+    for j = 1:maxsweeps
+        newpsi = copy(psi)
+        Literini = Liter
+        for i = 1:uc
+            newpsi[i], Liter, newbond = qr(Liter * newpsi[i], newbond, isites[i]; positive=true)
+        end
+        Liter = Liter / sqrt(inner(Liter, Liter))
+        Liter = ITensor(array(Liter, newbond, uniqueind(Liter, newbond)), newMleftind, commonind(psi[uc], psi[1]))
+        realtol = abs(inner(Liter, Literini) - 1)
+        # Check convergence by overlap with previous L
+        if realtol < tol
+            println("Converged after $j sweeps with error $realtol")
+            break
+        elseif j == maxsweeps
+            println("Warning: Did not converge after $maxsweeps sweeps, last error $realtol")
+        end
+        newbond = newMleftind
+    end
+    println("Below is the result")
+    newpsi = copy(psi)
+    newbond = newMleftind
+    Literini = Liter
+    for i = 1:uc
+        newpsi[i], Liter, newbond = qr(Liter * newpsi[i], newbond, isites[i]; positive=true)
+    end
+    Litertemp = ITensor(array(Liter, newbond, uniqueind(Liter, newbond)), newMleftind, commonind(psi[uc], psi[1]))
+    println(inner(Litertemp, Literini))
+    newpsi[1] *= delta(uniqueind(newpsi[1], isites[1], newpsi[2]), commonind(Liter, newpsi[uc]))
+    Liter = replaceind(Liter, uniqueind(Liter, newbond) => Mleftind)
+    return newpsi, Liter
+end
+
+function right_canonical_form(state::MPSdata, isites; pseudoinv=1e-8, tol=1e-8, maxsweeps=20)
+    #Initialization
+    psi = copy(state.ψ)
+    l2tensor = copy(state.lambda_1)
+    l4tensor = copy(state.lambda_end)
+    psi[1] = psi[1] * l2tensor
+    linv = ITensor(pinv(array(l4tensor), pseudoinv), commonind(psi[1], l4tensor), commonind(psi[end], l4tensor))  #Here we used the Penrose pseudo-inverse.
+    psi[end] = psi[end] * linv
+
+    uc = length(psi)
+    Mrightind = commonind(psi[uc], psi[1])
+    newMrightind = Index(dim(Mrightind))
+    R_ini = random_itensor(ComplexF64, Mrightind, newMrightind)
+    R_ini = R_ini / sqrt(inner(R_ini, R_ini))
+    newpsi = deepcopy(psi)
+    newbond = newMrightind
+    realtol = 1
+    Riter = R_ini
+    for j = 1:maxsweeps
+        newpsi = deepcopy(psi)
+        Riterini = Riter
+        for i = uc:-1:1
+            Riter, newpsi[i], newbond = rq(Riter * newpsi[i], uniqueind(newpsi[i] * Riter, isites[i], newbond); positive=true)
+        end
+        Riter = Riter / sqrt(inner(Riter, Riter))
+        Riter = ITensor(array(Riter, newbond, uniqueind(Riter, newbond)), newMrightind, commonind(psi[uc], psi[1]))
+        realtol = abs(inner(Riter, Riterini) - 1)
+        # Check convergence by overlap with previous L
+        if realtol < tol
+            println("Converged after $j sweeps with error $realtol")
+            break
+        elseif j == maxsweeps
+            println("Warning: Did not converge after $maxsweeps sweeps, last error $realtol")
+        end
+        newbond = newMrightind
+    end
+
+    println("Below is the result")
+    newpsi = deepcopy(psi)
+    newbond = newMrightind
+    Riterini = Riter
+    for i = uc:-1:1
+        Riter, newpsi[i], newbond = rq(Riter * newpsi[i], uniqueind(newpsi[i] * Riter, isites[i], newbond); positive=true)
+    end
+    Ritertemp = ITensor(array(Riter, newbond, uniqueind(Riter, newbond)), newMrightind, commonind(psi[uc], psi[1]))
+    println(inner(Ritertemp, Riterini))
+    newpsi[uc] *= delta(uniqueind(newpsi[uc], isites[uc], newpsi[uc-1]), commonind(Riter, newpsi[1]))
+    Riter = replaceind(Riter, uniqueind(Riter, newbond) => Mrightind)
+    return newpsi, Riter
 
 end
 
