@@ -2,14 +2,12 @@
 
 This repository contains a lightly cleaned-up implementation of the iDMRG (infinite DMRG) routines used in [arXiv:2503.22792]. It was written from scratch to meet the specific requirements of that project, while adopting many ideas and best practices from the ITensor and TenPy ecosystems. Any remaining mistakes are mine.
 
-Features:
-1. Draw figures for Kitaev model
-
-Future plans of expanding the codebase:
+Future goals:
 1. Add QN-conservation
 2. Support fermion.
 
-Comments and feedbacks are welcomed. And if you want to use the code in your own work or have spotted any bugs, please contact me at yangxusolidstate@gmail.com.
+Comments and feedback are welcome. If you plan to build on this code in your own work or notice any issues, feel free to reach out at yangxusolidstate@gmail.com, or just open an issue or pull request here.
+
 
 ### Features
 
