@@ -1,6 +1,6 @@
 # iDMRG.jl
 
-This repository contains a lightly cleaned-up implementation of the iDMRG (infinite DMRG) routines used in [arXiv:2503.22792]. It was written from scratch to meet the specific requirements of that project, while adopting many ideas and best practices from the ITensor and TenPy ecosystems. Any remaining mistakes are mine.
+This repository provides a lightly refined implementation of the iDMRG (infinite DMRG) routines used in [arXiv:2503.22792]. It was developed from scratch using core ITensor functionalities to address the specific needs of that project, while drawing inspiration and best practices from both the ITensor and TenPy ecosystems. Any remaining errors are my own responsibility.
 
 Future goals:
 1. Add QN-conservation
